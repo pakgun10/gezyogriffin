@@ -161,7 +161,12 @@ async def _handle(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "rendered_chars": len(rendered)})
 
 
-async def start_server(port: int = DEFAULT_PORT) -> web.AppRunner:
+async def start_server(port: int | None = None) -> web.AppRunner:
+    # bot.py loads the canonical state .env after importing this module, so
+    # resolve WEBHOOK_PORT at startup rather than freezing the import-time
+    # default. An explicit argument still wins for callers/tests.
+    if port is None:
+        port = int(os.environ.get("WEBHOOK_PORT", str(DEFAULT_PORT)))
     app = web.Application()
     app.router.add_post("/hooks/{path}", _handle)
     runner = web.AppRunner(app)

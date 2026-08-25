@@ -15,6 +15,7 @@ import contextlib
 import importlib
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -96,6 +98,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
+# httpx logs full request URLs at INFO; Telegram bot URLs contain the secret
+# token, so keep that transport logger quiet in normal operation.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("opengriffin")
 
 
@@ -366,6 +371,32 @@ async def ask_claude_with_progress(
     state = progress_module.start(chat_id, status_msg_id)
     hb = asyncio.create_task(_heartbeat(state, bot))
     try:
+        # The Claude Agent SDK remains the full-featured path, but the
+        # provider selected in .env (or via /model) must also be honoured.
+        # OpenAI-compatible providers cannot resume Claude sessions or run
+        # the MCP tool graph, so they receive a normal chat completion.
+        selected = aliases_module.get_chat_model(chat_id)
+        provider_name = (selected.get("provider") or os.environ.get("OPENGRIFFIN_PROVIDER", "claude")).strip().lower()
+        if provider_name != "claude":
+            text, sid, cost, in_tok, out_tok = await asyncio.wait_for(
+                _stream_selected_provider(
+                    chat_id,
+                    prompt,
+                    selected.get("model"),
+                ),
+                timeout=progress_module.REQUEST_TIMEOUT_SEC,
+            )
+            usage_module.record(
+                chat_id=str(chat_id),
+                job_id=None,
+                session_id=None,
+                cost_usd=cost,
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                extra={"topic": topics_module.active_topic(chat_id), "provider": provider_name},
+            )
+            return redact(text) or "(no response)"
+
         for attempt in (1, 2):
             resumed_sid = topics_module.session_id_for(chat_id)
             try:
@@ -414,6 +445,37 @@ async def ask_claude_with_progress(
             await hb
 
 
+async def _stream_selected_provider(
+    chat_id: int,
+    prompt: str,
+    model: str | None,
+) -> tuple[str, str | None, float | None, int | None, int | None]:
+    """Call the configured non-Claude provider.
+
+    Provider objects expose a small common ``chat`` interface.  This path is
+    intentionally tool-free: MCP/Claude Code tools require the Claude Agent
+    SDK, while hosted OpenAI-compatible providers only provide text chat.
+    """
+    from .providers import get_provider
+
+    selected = aliases_module.get_chat_model(chat_id)
+    provider_name = (selected.get("provider") or os.environ.get("OPENGRIFFIN_PROVIDER", "claude")).strip().lower()
+    provider = get_provider(provider_name)
+    if model:
+        # Provider constructors read the global model env.  A per-chat model
+        # is applied to the instance so it does not mutate other chats.
+        with contextlib.suppress(Exception):
+            provider.model = model
+    result = await provider.chat([{"role": "user", "content": prompt}])
+    return (
+        str(result.get("content") or ""),
+        None,
+        result.get("cost_usd"),
+        result.get("input_tokens"),
+        result.get("output_tokens"),
+    )
+
+
 # ---------- helpers ----------
 
 
@@ -422,6 +484,72 @@ def _authorized(update: Update) -> bool:
         return True
     user = update.effective_user
     return bool(user and user.id in ALLOWED_USERS)
+
+
+def _is_group_update(update: Update) -> bool:
+    chat = update.effective_chat
+    return bool(chat and chat.type in {"group", "supergroup"})
+
+
+async def _targets_bot(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Whether a group message is a direct request to this bot.
+
+    A reply counts only when it replies to the bot's own message.  Mentions
+    support both Telegram's @username entity and text mentions.  The bot's
+    identity is cached after the first lookup to avoid a Bot API call per
+    message.
+    """
+    msg = update.effective_message
+    if msg is None:
+        return False
+    bot_id = getattr(ctx.bot, "id", None)
+    username = getattr(ctx.bot, "username", None)
+    cache = getattr(ctx, "bot_data", None)
+    if isinstance(cache, dict):
+        bot_id = cache.get("_identity_id", bot_id)
+        username = cache.get("_identity_username", username)
+    if not bot_id or not username:
+        with contextlib.suppress(Exception):
+            me = await ctx.bot.get_me()
+            bot_id = me.id
+            username = me.username
+            if isinstance(cache, dict):
+                cache["_identity_id"] = bot_id
+                cache["_identity_username"] = username
+
+    replied = getattr(msg, "reply_to_message", None)
+    replied_user = getattr(replied, "from_user", None)
+    if bot_id and replied_user and replied_user.id == bot_id:
+        return True
+
+    text = getattr(msg, "text", None) or ""
+    if not username or not text:
+        return False
+    return bool(re.search(r"@" + re.escape(username) + r"(?:\b|$)", text, re.IGNORECASE))
+
+
+async def gate_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop unauthorized or undirected group commands before command handlers."""
+    if not _authorized(update):
+        raise ApplicationHandlerStop
+    if _is_group_update(update) and not await _targets_bot(update, ctx):
+        raise ApplicationHandlerStop
+
+
+async def cmd_login(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
+    provider = os.environ.get("OPENGRIFFIN_PROVIDER", "claude").strip().lower()
+    if provider != "claude":
+        await update.effective_message.reply_text(
+            f"Provider aktif: {provider}. /login tidak diperlukan; kredensial dibaca dari konfigurasi provider."
+        )
+        return
+    await update.effective_message.reply_text(
+        "Login Claude harus dilakukan di terminal, bukan dari Telegram. Jalankan "
+        "`HOME=/home/pgun/apps/gezyogriffin/home OPENGRIFFIN_HOME=/home/pgun/apps/gezyogriffin/state claude login` "
+        "lalu ikuti alur login di browser."
+    )
 
 
 async def _send_long(update: Update, text: str) -> None:
@@ -910,6 +1038,11 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         log.info("Unauthorized message from %s", update.effective_user)
         return
+    if _is_group_update(update) and not await _targets_bot(update, ctx):
+        # Telegram must have privacy mode disabled if the bot is expected to
+        # observe every group message; observation is still silent here.
+        log.info("Ignoring undirected group message from %s", update.effective_user)
+        return
     text = (update.message.text or "").strip()
     if not text:
         return
@@ -995,6 +1128,8 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
+        return
+    if _is_group_update(update) and not await _targets_bot(update, ctx):
         return
     chat_id = update.effective_chat.id
     voice = update.message.voice or update.message.audio
@@ -1245,6 +1380,9 @@ def main() -> None:
         .post_shutdown(_post_shutdown)
         .build()
     )
+    # Gate commands before individual handlers so an authorized user still
+    # cannot make the bot talk in a group unless replying to or mentioning it.
+    app.add_handler(MessageHandler(filters.COMMAND, gate_command), group=-1)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("topic", cmd_topic))
@@ -1271,6 +1409,7 @@ def main() -> None:
     app.add_handler(CommandHandler("personality", cmd_personality))
     app.add_handler(CommandHandler("providers", cmd_providers))
     app.add_handler(CommandHandler("model", cmd_model))
+    app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(approvals_module.HANDLER)
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
