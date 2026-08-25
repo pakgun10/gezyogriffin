@@ -202,8 +202,21 @@ class OpenAICompatibleProvider:
             kwargs["tools"] = tools
         resp = await self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
+        tool_calls = []
+        for call in choice.message.tool_calls or []:
+            tool_calls.append(
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments or "{}",
+                    },
+                }
+            )
         return {
             "content": choice.message.content or "",
+            "tool_calls": tool_calls,
             "input_tokens": resp.usage.prompt_tokens if resp.usage else None,
             "output_tokens": resp.usage.completion_tokens if resp.usage else None,
         }
