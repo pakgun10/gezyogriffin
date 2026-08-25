@@ -7,6 +7,7 @@ Every knob in one place. Everything in `~/.opengriffin/.env` (or the project roo
 ```bash
 OPENGRIFFIN_PROVIDER=claude   # claude | anthropic | openai | gemini | deepseek | ...
 OPENGRIFFIN_MODEL=            # optional — override the provider's default model
+OPENGRIFFIN_BOT_NAME=Gezy     # Telegram identity; change and restart to rename
 ```
 
 See [providers.md](providers.md) for the 21 supported providers and their default models.

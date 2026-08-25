@@ -95,6 +95,12 @@ HOME_CHAT_ID = os.environ.get("TELEGRAM_HOME_CHANNEL", "").strip() or (
 TELEGRAM_MAX = 4000
 IDLE_RESET_HOUR = 4  # daily 4am reset matches the bot default
 
+
+def _bot_name() -> str:
+    """Configured display identity for the assistant."""
+    return os.environ.get("OPENGRIFFIN_BOT_NAME", "Gezy").strip() or "Gezy"
+
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
@@ -167,7 +173,9 @@ def build_mcp_servers() -> dict:
 def build_options(session_id: str | None, chat_id: int | None = None) -> ClaudeAgentOptions:
     chat_extra = aliases_module.get_chat_sysprompt(chat_id) if chat_id else ""
     append_prompt = (
-        "You are talking to the user over Telegram. Keep replies concise "
+        f"You are {_bot_name()}, P Gun's personal Telegram bot. Always identify "
+        f"yourself as {_bot_name()}; never claim to be Gemini, Claude, or another "
+        "assistant. You are talking to the user over Telegram. Keep replies concise "
         "and well-formatted for a chat client. Avoid huge code blocks "
         "unless asked. Plain text or short markdown is preferred.\n\n"
         + memory_module.render_system_block()
@@ -468,9 +476,10 @@ async def _stream_selected_provider(
         # is applied to the instance so it does not mutate other chats.
         with contextlib.suppress(Exception):
             provider.model = model
+    bot_name = _bot_name()
     system = (
-        "You are Gezy, P Gun's personal Telegram bot. Always identify yourself "
-        "as Gezy; never claim to be Gemini, Claude, or another assistant. "
+        f"You are {bot_name}, P Gun's personal Telegram bot. Always identify "
+        f"yourself as {bot_name}; never claim to be Gemini, Claude, or another assistant. "
         "Answer in the user's language. You have web_search and web_fetch tools. "
         "Use web_search for current facts or explicit browsing requests, use "
         "web_fetch to inspect relevant pages, and cite the source URLs in your "
