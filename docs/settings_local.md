@@ -27,12 +27,51 @@ Bot belum dijalankan karena credential belum tersedia. Tambahkan token Telegram 
 
 `/home/pgun/apps/gezyogriffin/state/.env`
 
-Untuk mencoba manual:
-
+Menjalankan aplikasi:
 ```bash
-/home/pgun/apps/gezyogriffin/run-isolated.sh doctor
 /home/pgun/apps/gezyogriffin/run-isolated.sh run
 ```
+Perintah iitu berjalan foreground; biarkan terminal tetap terbuka.
+
+
+Untuk  pemeriksaan konfigurasi, opsional:
+```bash
+/home/pgun/apps/gezyogriffin/run-isolated.sh doctor
+```
+Jika ingin cek konfigurasi provider terlebih dahulu, jalankan `doctor`. Namun pada versi sekarang, `doctor` kadang tidak otomatis membaca `.env`, sehingga bisa menampilkan token “missing” walaupun file state sudah terisi.
+
+Jika bot sudah berjalan dan `.env` diubah, lakukan restart proses bot, bukan menjalankan banyak instance bersamaan.
+
+Setelah mengubah `.env`, jalankan restart aman ini di terminal:
+
+```bash
+APP_DIR=/home/pgun/apps/gezyogriffin
+
+BOT_PID=$(ps -eo pid=,args= | awk '$0 ~ /\/home\/pgun\/apps\/gezyogriffin\/\.venv\/bin\/opengriffin run$/ {print $1; exit}')
+
+if [ -n "$BOT_PID" ]; then
+  kill -TERM "$BOT_PID"
+  sleep 2
+fi
+
+cd "$APP_DIR"
+setsid -f ./run-isolated.sh run >> "$APP_DIR/state/opengriffin.log" 2>&1
+
+sleep 3
+ps -eo pid,ppid,etime,args | grep 'opengriffin run' | grep -v grep
+tail -n 20 "$APP_DIR/state/opengriffin.log"
+```
+
+Gunakan `run-isolated.sh`, bukan menjalankan `opengriffin run` langsung, agar `HOME` dan state terisolasi tetap benar.
+
+### Gambar Telegram
+
+Bot meneruskan foto Telegram (maksimum 8 MB) sebagai input vision ke provider
+OpenAI-compatible yang dikonfigurasi, termasuk 9router. Di grup, foto hanya
+dijawab jika dikirim dengan mention bot atau sebagai reply ke pesan bot. Anda
+juga dapat membalas foto pengguna dengan mention bot; foto yang direply akan
+ikut diteruskan ke model.
+
 
 Service systemd sudah disiapkan, tetapi belum diaktifkan agar bot tidak gagal berulang tanpa credential.
 
