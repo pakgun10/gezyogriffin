@@ -53,6 +53,7 @@ from . import kanban as kanban_module
 from . import memory as memory_module
 from . import paths as paths_module
 from . import progress as progress_module
+from . import provider_context as provider_context_module
 from . import recall as recall_module
 from . import self_improve as self_improve_module
 from . import tools as tools_module
@@ -95,7 +96,13 @@ HOME_CHAT_ID = os.environ.get("TELEGRAM_HOME_CHANNEL", "").strip() or (
 
 TELEGRAM_MAX = 4000
 TELEGRAM_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+IMAGE_CONTEXT_TTL_SEC = 30 * 60
 IDLE_RESET_HOUR = 4  # daily 4am reset matches the bot default
+
+# The image bytes are intentionally process-local; provider_context persists
+# text only.  This enables a follow-up such as "warna apa?" after replying to
+# the bot's image description without retaining image data in state files.
+_LAST_IMAGES: dict[int, tuple[float, str]] = {}
 
 
 def _bot_name() -> str:
@@ -506,10 +513,9 @@ async def _stream_selected_provider(
         ]
     else:
         user_content = prompt
-    messages: list[dict] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
-    ]
+    messages: list[dict] = [{"role": "system", "content": system}]
+    messages.extend(provider_context_module.get(chat_id))
+    messages.append({"role": "user", "content": user_content})
     tool_defs = (
         web_tools.WEB_TOOLS
         if os.environ.get("TAVILY_API_KEY", "").strip()
@@ -546,8 +552,10 @@ async def _stream_selected_provider(
                     "content": output[:30_000],
                 }
             )
+    answer = str(result.get("content") or "")
+    provider_context_module.append(chat_id, prompt, answer)
     return (
-        str(result.get("content") or ""),
+        answer,
         None,
         result.get("cost_usd"),
         result.get("input_tokens"),
@@ -582,6 +590,27 @@ async def _photo_data_url(message) -> str | None:
     if len(raw) > TELEGRAM_IMAGE_MAX_BYTES:
         raise ValueError("gambar terlalu besar (maksimum 8 MB)")
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _remember_image(chat_id: int, image_data_url: str | None) -> None:
+    if image_data_url:
+        _LAST_IMAGES[chat_id] = (time.monotonic(), image_data_url)
+
+
+def _recent_image(chat_id: int) -> str | None:
+    item = _LAST_IMAGES.get(chat_id)
+    if not item:
+        return None
+    timestamp, image_data_url = item
+    if time.monotonic() - timestamp > IMAGE_CONTEXT_TTL_SEC:
+        _LAST_IMAGES.pop(chat_id, None)
+        return None
+    return image_data_url
+
+
+def _clear_provider_context(chat_id: int) -> None:
+    _LAST_IMAGES.pop(chat_id, None)
+    provider_context_module.reset(chat_id)
 
 
 async def _targets_bot(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -687,6 +716,7 @@ async def cmd_reset(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     topics_module.reset(chat_id)
+    _clear_provider_context(chat_id)
     await update.effective_message.reply_text(
         f"Topic '{topics_module.active_topic(chat_id)}' reset."
     )
@@ -1148,6 +1178,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             await update.effective_message.reply_text(f"Gagal membaca gambar: {e}")
             return
+    if image_data_url:
+        _remember_image(chat_id, image_data_url)
+    else:
+        # A reply to the bot's previous description no longer contains the
+        # original Telegram photo. Reuse the most recent image briefly so
+        # follow-ups such as "warna apa?" remain grounded in that image.
+        image_data_url = _recent_image(chat_id)
 
     if progress_module.is_running(chat_id):
         await update.effective_message.reply_text(
@@ -1243,6 +1280,7 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not image_data_url:
         return
+    _remember_image(chat_id, image_data_url)
     prompt = (getattr(update.effective_message, "caption", None) or "").strip()
     if not prompt:
         prompt = "Jelaskan gambar ini secara ringkas dan sebutkan teks yang terlihat jika ada."

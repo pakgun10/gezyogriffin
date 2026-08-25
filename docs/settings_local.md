@@ -72,6 +72,10 @@ dijawab jika dikirim dengan mention bot atau sebagai reply ke pesan bot. Anda
 juga dapat membalas foto pengguna dengan mention bot; foto yang direply akan
 ikut diteruskan ke model.
 
+Untuk provider custom/9router, bot menyimpan konteks teks enam percakapan
+terakhir per chat. Gambar terakhir disimpan hanya di memori proses selama 30
+menit untuk mendukung pertanyaan lanjutan; `/reset` menghapus konteks tersebut.
+
 
 Service systemd sudah disiapkan, tetapi belum diaktifkan agar bot tidak gagal berulang tanpa credential.
 

@@ -5,7 +5,7 @@ import asyncio
 from opengriffin import bot, providers
 
 
-def test_stream_selected_provider_sends_openai_multimodal_content(monkeypatch):
+def test_stream_selected_provider_sends_openai_multimodal_content(monkeypatch, tmp_path):
     seen = []
 
     class FakeProvider:
@@ -22,6 +22,9 @@ def test_stream_selected_provider_sends_openai_multimodal_content(monkeypatch):
 
     monkeypatch.setattr(bot.aliases_module, "get_chat_model", lambda _chat_id: {})
     monkeypatch.setattr(providers, "get_provider", lambda _name: FakeProvider())
+    monkeypatch.setattr(
+        bot.provider_context_module, "STORE_FILE", tmp_path / "provider_context.json"
+    )
     image = "data:image/jpeg;base64,ZmFrZQ=="
     result = asyncio.run(bot._stream_selected_provider(1, "Apa ini?", "cx/test", image))
 
@@ -30,6 +33,17 @@ def test_stream_selected_provider_sends_openai_multimodal_content(monkeypatch):
     assert user["role"] == "user"
     assert user["content"][0] == {"type": "text", "text": "Apa ini?"}
     assert user["content"][1] == {"type": "image_url", "image_url": {"url": image}}
+
+
+def test_provider_context_keeps_text_but_not_image(monkeypatch, tmp_path):
+    from opengriffin import provider_context
+
+    monkeypatch.setattr(provider_context, "STORE_FILE", tmp_path / "provider_context.json")
+    provider_context.append(99, "Apa ini?", "Ini poster.")
+    assert provider_context.get(99) == [
+        {"role": "user", "content": "Apa ini?"},
+        {"role": "assistant", "content": "Ini poster."},
+    ]
 
 
 def test_photo_data_url_uses_largest_photo_and_rejects_oversize(monkeypatch):
